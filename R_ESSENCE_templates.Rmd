@@ -1,0 +1,188 @@
+---
+title: "R Widget template - Not Configured for External Use - CC and DD Category: Air Quality-related Respiratory Illness v1"
+author: "Robert Sucsy"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+  state_abbreviation: "ri"
+  end_date_of_interest: !r Sys.Date()
+  start_date_of_interest: !r Sys.Date()-90
+  API_of_rawdata_of_interest: "https://essence.syndromicsurveillance.org/nssp_essence/api/dataDetails?geography=ri&datasource=va_er&startDate=9Mar2023&medicalGroupingSystem=essencesyndromes&userId=5576&endDate=1Jun2023&percentParam=noPercent&aqtTarget=DataDetails&ccddCategory=air%20quality-related%20respiratory%20illness%20v1&geographySystem=state&detector=probrepswitch&timeResolution=daily"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+#defines CRAN repo
+r = getOption("repos")
+r["CRAN"] = "http://cran.us.r-project.org"
+options(repos = r)
+
+#installs Rnssp since it's not in CRAN
+if (require(Rnssp) == TRUE) {
+  library(Rnssp)
+} else if (require(devtools) == TRUE) {
+  devtools::install_github("cdcgov/Rnssp")
+  library(Rnssp)
+} else {
+  install.packages("devtools")
+  devtools::install_github("cdcgov/Rnssp")
+  library(Rnssp)
+}
+
+#Installs CRAN packages
+#for final make sure package lists are correct
+list.of.packages <- c("tidyverse","httr","jsonlite","knitr","ggthemes","lubridate","tidycensus","ggmap","plotly","leaflet","stats","Hmisc","rpivotTable","dplyr", "janitor", "epitools")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) {install.packages(new.packages)}
+
+lapply(list.of.packages, require, character.only = TRUE)
+
+#Code Stopped running? Make sure password is up to date for the profile
+load("~/myProfile.rda") 
+```
+
+The following is for internal use only.This is a preliminary surveillance effort into health outcomes related to the current poor air quality due to Canada wildfires.
+
+The health outcome in particular used for aggregation is the Chief Complaint & Discharge Diagnosis Category: Air Quality-related Respiratory Illness v1. This is a combination of multiple aqm-related health outcomes; for specifics see page 7 in the link **[here](https://cste-my.sharepoint.com/personal/aaltabbaa_cste_org/_layouts/15/onedrive.aspx?id=%2Fpersonal%2Faaltabbaa%5Fcste%5Forg%2FDocuments%2FAlyaa%20Altabbaa%2FWildfire%20and%20Smoke%20Syndromic%20Surveillance%5FFINAL%2Epdf&parent=%2Fpersonal%2Faaltabbaa%5Fcste%5Forg%2FDocuments%2FAlyaa%20Altabbaa&ga=1)**.
+
+The data is from the CDC's ESSENCE database, a syndromic surveillance databse originating from hospital records.Regarding data quality, there appears to be a lag in reporting, so it will be worth ongoing examination.
+(NSSP ESSENCE: National Syndromic Surveillance Program – 
+Electronic Surveillance System for the Early Notification of Community-based Epidemics)
+
+
+Additional note: That bright ZIP code in SW RI is centered on Chariho middle and high schools, and otherwise has  a low population, which is likely the source of it's anomalous results
+
+If there are further questions or if an additional tool is required please contact robert.sucsy@health.ri.gov
+
+
+```{r config, include=FALSE}
+geography<-params$state_abbreviation
+geography<-tolower(geography)
+
+end_date_of_interest<-params$end_date_of_interest
+start_date_of_interest<-params$start_date_of_interest
+
+end_date_of_interest<-as.Date(end_date_of_interest)
+start_date_of_interest<-as.Date(start_date_of_interest)
+
+endDate <- format(end_date_of_interest, "%d%b%Y")
+startDate <- format(start_date_of_interest, "%d%b%Y")
+
+datestring<-as.data.frame(seq(as.Date(start_date_of_interest), as.Date(end_date_of_interest), "days"))
+datestring$Date = datestring$`seq(as.Date(start_date_of_interest), as.Date(end_date_of_interest), "days")`
+datestring<-subset(datestring, select = Date)
+
+load("~/myProfile.rda") 
+```
+
+```{r importing raw data, include=FALSE}
+
+rawdata_url<-params$API_of_rawdata_of_interest
+rawdata_url<-str_replace(rawdata_url,"geography=[a-z]+", paste0("geography=",geography))
+rawdata_url<-str_replace(rawdata_url ,"startDate=\\d{1,2}\\w{3}\\d{4}", paste0("startDate=",startDate))
+rawdata_url<-str_replace(rawdata_url ,"endDate=\\d{1,2}\\w{3}\\d{4}", paste0("endDate=",endDate))
+
+
+rawdata_pull<-get_api_data(rawdata_url)
+rawdata<-rawdata_pull$dataDetails
+
+zipsums<-rawdata %>% group_by(ZipCode) %>% summarise(count=length(Date))
+datesums<-rawdata %>% group_by(Date) %>% summarise(count=length(Date))
+datesums$Date<-as.Date(datesums$Date, tryFormats = c("%m/%d/%Y"))
+
+datesums<-left_join(datestring,datesums)
+datesums$count<- ifelse(is.na(datesums$count), 0, datesums$count)
+
+state_wide<-get_acs(geography = "zip code tabulation area",
+                 variables = c(tot_pop = "B01001_001"),
+                 state = geography,
+                 year = 2019,
+                 geometry = TRUE,
+                 output = "wide")
+
+countzips<-left_join(state_wide, zipsums, by = c("GEOID" = "ZipCode"))
+countzips$countper10000<-round(10000*countzips$count/countzips$tot_popE, digits = 3)
+```
+
+```{r age-adjusted rate, include=FALSE}
+acs5vars2021<-load_variables(2021,"acs5", cache=T)
+
+varlist<-acs5vars2021[grep("B01001", acs5vars2021$name),] 
+varlist<-varlist[1:49,1:2]
+varlist$name<-paste0(varlist$name,"E")
+varlist<-varlist %>% add_row(name = "GEOID", label = "GEOID")
+varlist<-varlist %>% add_row(name = "NAME", label = "NAME")
+varlist<-varlist %>% add_row(name = "geometry", label = "geometry")
+
+ri_blocks<-get_acs(geography = "block group",
+                   table = "B01001",
+                   state = "RI",
+                   year = 2021,
+                   geometry = TRUE,
+                   output = "wide")
+
+ri_blocks<-ri_blocks[,c(1,2,seq(3, 101, by = 2))]
+
+names(ri_blocks) <- varlist$label[match(names(ri_blocks), varlist$name)]
+
+ri_blocks<-ri_blocks %>% clean_names()
+
+ri_block_centroid<-st_centroid(ri_blocks)
+
+joined_zctas_and_blocks<-st_join(state_wide,ri_block_centroid)
+
+joined_zctas_and_blocks<-joined_zctas_and_blocks[,-c(2:6)]
+
+zcta_summaries<-joined_zctas_and_blocks %>% group_by(GEOID, geometry) %>% summarise(across(everything(), list(sum), na.rm = TRUE))
+```
+
+```{r map, include = FALSE}
+#leaflet plot
+colorpalette <- colorNumeric("viridis", countzips$countper10000)
+
+label_asthma <- function(GEOID, countper10000){
+  str_glue("Zip code {GEOID} had {countper10000} outcomes of interest per ten thousand people")
+}
+
+
+plot3<-countzips %>% 
+  leaflet() %>% 
+  addPolygons(weight = 1,
+              color = "white",
+              fillColor = ~colorpalette(countper10000),
+              fillOpacity = 1,
+              popup = ~label_asthma(GEOID, countper10000)) %>% 
+  addTiles() %>% 
+  addLegend(pal = colorpalette,
+            values = ~countper10000,
+            title = "Count per </br>10,000 People",
+            opacity = 1)
+```
+
+```{r asthma time series plots,include=FALSE}
+
+plot4<-ggplot(datesums, aes(x= Date)) + geom_smooth(aes(y= count), method = "loess", formula = "y~x",span = 7/90) +
+  theme_classic()+
+  ggtitle("Count, Past 90 days")+
+  geom_point(aes(y= count)) 
+plot4
+
+plot4<-ggplotly(plot4)
+
+```
+
+```{r text generation, echo=FALSE}
+header_text<-paste0("There were ", length(rawdata$Visit_ID)," outcomes of interest ", start_date_of_interest," and ",end_date_of_interest)
+```
+
+# `r header_text`
+
+```{r print, echo = FALSE}
+plot3
+plot4
+rawdata_subset<-rawdata[,c("HospitalName", "ZipCode", "Region", "Sex", "Age", "c_ethnicity", "c_race", "AgeGroup")]
+rpivotTable(data = rawdata_subset, rows = "AgeGroup",cols="Sex", vals = "Freq", aggregatorName = "Count", rendererName = "Table")
+```
+
+
